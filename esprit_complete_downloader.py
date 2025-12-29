@@ -161,7 +161,7 @@ def save_html_page(content, save_path, mode='html'):
         return False
 
 
-def download_course_complete(course, save_location='./ESPRIT_Downloads', save_html_pages=False):
+def download_course_complete(course, save_location='./downloads', save_html_pages=False):
     """Download ALL files from a course"""
     print(f"\n{Fore.CYAN}{'=' * 70}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}Downloading: {course.name}{Style.RESET_ALL}")
@@ -290,7 +290,7 @@ def main():
             username=username,
             password=password,
             site=site,
-            save_location='./ESPRIT_Downloads',
+            save_location='./downloads',
             thread_count=8,
             use_manifest=True,
             backup_files=False
@@ -348,7 +348,7 @@ def main():
             except ValueError:
                 print(f"{Fore.RED}✗ Invalid input{Style.RESET_ALL}")
 
-        print(f"\n{Fore.GREEN}✅ All done! Files saved to: ./ESPRIT_Downloads/{Style.RESET_ALL}")
+        print(f"\n{Fore.GREEN}✅ All done! Files saved to: ./downloads/{Style.RESET_ALL}")
 
     except KeyboardInterrupt:
         print(f"\n\n{Fore.YELLOW}⚠ Interrupted{Style.RESET_ALL}")
