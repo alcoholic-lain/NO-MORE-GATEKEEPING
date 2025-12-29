@@ -27,7 +27,7 @@ from rich.table import Table
 # Configuration
 BLACKBOARD_URL = "https://esprit.blackboard.com"
 DOWNLOAD_DIR = Path(__file__).parent / "downloads"
-HEADLESS = True  # Must be True for PDF generation to work
+HEADLESS = True
 
 console = Console()
 
@@ -296,39 +296,56 @@ async def download_module_recursive(page: Page, module: dict, save_dir: Path, de
         # Expand the module and get contents
         items, subfolders = await expand_module(page, module)
         
+        console.print(f"{indent}[dim]Found {len(items)} items, {len(subfolders)} subfolders[/]")
+        
         # Download all direct items first
         for item in items:
             console.print(f"{indent}📄 {item['name']}")
             try:
                 await scrape_content_item(page, item, save_dir)
-            except:
+            except Exception as e:
+                console.print(f"{indent}[red]Error: {e}[/]")
                 continue
         
-        # Process each subfolder - go back to course page after each
-        for i, folder in enumerate(subfolders):
-            console.print(f"{indent}[bold]📁 {folder['name']}[/]")
-            subdir = save_dir / sanitize_filename(folder['name'])
+        # Store subfolder info before processing (names and selectors)
+        subfolder_list = [(f['name'], f['selector'], f.get('controls')) for f in subfolders]
+        
+        # Process each subfolder
+        for i, (folder_name, folder_selector, folder_controls) in enumerate(subfolder_list):
+            console.print(f"{indent}[bold]📁 {folder_name}[/]")
+            subdir = save_dir / sanitize_filename(folder_name)
             subdir.mkdir(parents=True, exist_ok=True)
             
             try:
+                # Go back to course page to ensure clean state
+                await page.goto(course_url, timeout=30000)
+                await page.wait_for_load_state("networkidle", timeout=15000)
+                await asyncio.sleep(2)
+                
+                # Re-expand the parent module first
+                await expand_module(page, module)
+                await asyncio.sleep(1)
+                
+                # Now create a fresh folder reference and expand it
+                folder = {
+                    "name": folder_name,
+                    "selector": folder_selector,
+                    "controls": folder_controls,
+                    "type": "folder"
+                }
+                
                 await asyncio.wait_for(
                     download_module_recursive(page, folder, subdir, depth + 1, course_url),
-                    timeout=120
+                    timeout=180  # Increased timeout
                 )
             except asyncio.TimeoutError:
-                console.print(f"{indent}[yellow]⚠ Timeout, skipping[/]")
-            except:
-                pass
-            
-            # After processing a subfolder, go back to course page and re-expand parent
-            if i < len(subfolders) - 1:  # Don't refresh after last folder
-                await page.goto(course_url, timeout=30000)
-                await asyncio.sleep(2)
-                # Re-expand the parent module to access next subfolder
-                await expand_module(page, module)
+                console.print(f"{indent}[yellow]⚠ Timeout on {folder_name}, skipping[/]")
+            except Exception as e:
+                console.print(f"{indent}[yellow]⚠ Error on {folder_name}: {e}[/]")
+                continue
                 
-    except:
-        pass
+    except Exception as e:
+        console.print(f"{indent}[red]Module error: {e}[/]")
 
 
 async def download_attachments(page: Page, save_dir: Path) -> int:
@@ -578,7 +595,7 @@ async def navigate_and_scrape(page: Page):
             table.add_row(str(i), course["name"])
         
         console.print(table)
-        console.print("\n  [cyan]1-N[/] Select course | [cyan]i[/] Interactive | [cyan]q[/] Quit")
+        console.print("\n  [cyan]1-N[/] Select course | [cyan]all[/] Download ALL | [cyan]i[/] Interactive | [cyan]q[/] Quit")
         
         choice = Prompt.ask("Choice")
         
@@ -588,6 +605,49 @@ async def navigate_and_scrape(page: Page):
             save_dir = DOWNLOAD_DIR / "interactive"
             await interactive_mode(page, save_dir)
             continue
+        elif choice.lower() == 'all':
+            # Download ALL courses
+            console.print(f"\n[bold blue]🚀 Auto-downloading ALL {len(courses)} courses...[/]")
+            
+            for course_idx, course in enumerate(courses, 1):
+                console.print(f"\n[bold magenta]━━━ Course {course_idx}/{len(courses)}: {course['name']} ━━━[/]")
+                
+                try:
+                    # Navigate to courses page
+                    await page.goto(f"{BLACKBOARD_URL}/ultra/course", timeout=60000)
+                    await page.wait_for_load_state("networkidle", timeout=30000)
+                    await asyncio.sleep(2)
+                    await scroll_to_load_all(page)
+                    
+                    # Click on course
+                    await page.click(course['selector'])
+                    await page.wait_for_load_state("networkidle", timeout=30000)
+                    await asyncio.sleep(3)
+                    
+                    # Get course contents and download all
+                    course_dir = DOWNLOAD_DIR / sanitize_filename(course['name'])
+                    course_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    contents = await get_course_contents(page)
+                    
+                    for item in contents:
+                        if item["type"] == "item":
+                            console.print(f"  📄 {item['name']}")
+                            await scrape_content_item(page, item, course_dir)
+                        elif item["type"] == "module":
+                            console.print(f"  📁 {item['name']}")
+                            subdir = course_dir / sanitize_filename(item['name'])
+                            subdir.mkdir(parents=True, exist_ok=True)
+                            course_url = page.url  # Pass current course URL for navigation
+                            await download_module_recursive(page, item, subdir, course_url=course_url)
+                    
+                except Exception as e:
+                    console.print(f"[red]  Error: {e}[/]")
+                    continue
+            
+            console.print(f"\n[bold green]✅ ALL COURSES DOWNLOADED![/]")
+            console.print(f"[bold green]📁 Saved to: {DOWNLOAD_DIR}[/]")
+            break
         
         try:
             idx = int(choice) - 1
