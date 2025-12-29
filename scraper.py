@@ -334,12 +334,10 @@ async def download_module_recursive(page: Page, module: dict, save_dir: Path, de
                     "type": "folder"
                 }
                 
-                await asyncio.wait_for(
-                    download_module_recursive(page, folder, subdir, depth + 1, course_url),
-                    timeout=180  # Increased timeout
-                )
-            except asyncio.TimeoutError:
-                console.print(f"{indent}[yellow]⚠ Timeout on {folder_name}, skipping[/]")
+                # Call recursively without a hard timeout for the whole folder
+                # (Individual operations have their own timeouts)
+                await download_module_recursive(page, folder, subdir, depth + 1, course_url)
+
             except Exception as e:
                 console.print(f"{indent}[yellow]⚠ Error on {folder_name}: {e}[/]")
                 continue
