@@ -4,3 +4,5 @@ colorama
 browser-cookie3
 playwright
 beautifulsoup4
+hashlib
+glob

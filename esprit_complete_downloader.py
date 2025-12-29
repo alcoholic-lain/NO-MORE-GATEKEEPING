@@ -14,7 +14,10 @@ import getpass
 import re
 import html as html_lib
 from colorama import Fore, Style, init
-from urllib.parse import unquote
+from urllib.parse import unquote , urljoin, urlparse
+
+
+import hashlib
 
 init()
 
@@ -103,6 +106,143 @@ def download_pdf(client, url, filename, save_path):
         return False
 
 
+
+def extract_resources_from_html(body_html, base_url):
+    """Extract all resources (images, PDFs, etc.) from HTML"""
+    resources = []
+    
+    if not body_html:
+        return resources
+    
+    # Extract Blackboard attachments (images, docs, etc.)
+    bbfile_pattern = r'href="([^"]+)"[^>]*data-bbfile="({[^"]+})"'
+    for match in re.finditer(bbfile_pattern, body_html):
+        try:
+            url = html_lib.unescape(match.group(1))
+            decoded = html_lib.unescape(match.group(2))
+            file_data = json.loads(decoded)
+            
+            
+            filename = file_data.get('fileName') or file_data.get('linkName') or file_data.get('displayName')
+            mime_type = file_data.get('mimeType', '')
+            
+            if filename:
+                resources.append({
+                    'url': url,
+                    'filename': filename,
+                    'type': 'attachment',
+                    'mime': mime_type
+                })
+        except:
+            pass
+    
+    # Extract regular images
+    img_pattern = r'<img[^>]+src=["\']([^"\']+)["\']'
+    for url in re.findall(img_pattern, body_html, re.IGNORECASE):
+        url = html_lib.unescape(url)
+        if url.startswith('data:'):  # Skip data URLs
+            continue
+        if not any(r['url'] == url for r in resources):
+            resources.append({'url': url, 'type': 'image', 'filename': None})
+    
+    # Extract other document links
+    link_pattern = r'href=["\']([^"\']+\.(?:doc|docx|xls|xlsx|ppt|pptx)(?:\?[^"\']*)?)["\']'
+    for url in re.findall(link_pattern, body_html, re.IGNORECASE):
+        url = html_lib.unescape(url)
+        if not any(r['url'] == url for r in resources):
+            resources.append({'url': url, 'type': 'document', 'filename': None})
+    
+    return resources
+
+
+
+def sanitize_filename(filename):
+    """Clean filename for filesystem"""
+    return re.sub('[<>:"/\\\\|?*]', '', unquote(filename))
+
+
+def download_resource(client, url, filename, save_path):
+    """Download a resource and return local path"""
+    if url.startswith('/'):
+        url = client.site + url
+    elif not url.startswith('http'):
+        return None
+    
+    # Use provided filename or generate from URL
+    if not filename:
+        parsed = urlparse(url)
+        filename = parsed.path.split('/')[-1].split('?')[0]
+        
+        if not filename:
+            url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
+            ext = '.bin'
+            if 'image' in url.lower() or any(x in url.lower() for x in ['.jpg', '.png', '.gif']):
+                ext = '.jpg'
+            filename = f"resource_{url_hash}{ext}"
+    
+    filename_safe = sanitize_filename(filename)
+    download_location = os.path.join(save_path, filename_safe)
+    
+    try:
+        # Skip if already exists
+        if os.path.isfile(download_location):
+            return filename_safe
+        
+        response = client.session.get(url, allow_redirects=True, timeout=30)
+        
+        if response.status_code == 200:
+            os.makedirs(save_path, exist_ok=True)
+            with open(download_location, 'wb') as f:
+                f.write(response.content)
+            return filename_safe
+        else:
+            return None
+    except Exception as e:
+        print(f"      {Fore.RED}✗ Resource error: {str(e)}{Style.RESET_ALL}")
+        return None
+
+
+
+# def download_resource(client, url, save_path):
+#     """Download a resource and return local path"""
+#     if url.startswith('/'):
+#         url = client.site + url
+#     elif not url.startswith('http'):
+#         return None
+    
+#     # Generate filename from URL
+#     parsed = urlparse(url)
+#     filename = parsed.path.split('/')[-1].split('?')[0]
+    
+#     if not filename:
+#         # Use hash of URL as filename
+#         url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
+#         ext = '.bin'
+#         if 'image' in url.lower() or any(x in url.lower() for x in ['.jpg', '.png', '.gif']):
+#             ext = '.jpg'
+#         filename = f"resource_{url_hash}{ext}"
+    
+#     filename_safe = sanitize_filename(filename)
+#     download_location = os.path.join(save_path, filename_safe)
+    
+#     try:
+#         # Skip if already exists
+#         if os.path.isfile(download_location):
+#             return filename_safe
+        
+#         response = client.session.get(url, allow_redirects=True, timeout=30)
+        
+#         if response.status_code == 200:
+#             os.makedirs(save_path, exist_ok=True)
+#             with open(download_location, 'wb') as f:
+#                 f.write(response.content)
+#             return filename_safe
+#         else:
+#             return None
+#     except Exception as e:
+#         print(f"      {Fore.RED}✗ Resource error: {str(e)}{Style.RESET_ALL}")
+#         return None
+
 def save_html_page(content, save_path, mode='html'):
     """Save HTML content as a clean HTML file"""
     if not content.body:
@@ -122,6 +262,85 @@ def save_html_page(content, save_path, mode='html'):
         if os.path.isfile(download_location):
             print(f"      {Fore.YELLOW}⚠ Exists: {filename}{Style.RESET_ALL}")
             return False
+        
+        resources_folder = os.path.join(save_path, f"{filename_base}_files")
+        resources = extract_resources_from_html(content.body, content.client.site)
+        modified_body = content.body
+        print(f"      {Fore.CYAN}Downloading {len(resources)} resources{Style.RESET_ALL}")
+        downloaded_count = 0
+        for resource in resources:
+            # local_path = download_resource(content.client, resource['url'], resources_folder)
+            local_path = download_resource(
+                content.client, 
+                resource['url'], 
+                resource.get('filename'),
+                resources_folder
+            )
+            if local_path:
+                # Update HTML to use local path
+                old_url = resource['url'] 
+                new_url = f"{filename_base}_files/{local_path}"
+                if resource['type'] == 'attachment' and resource.get('mime', '').startswith('image/'):
+                    # Find the full <a> tag with data-bbfile
+                    pattern = rf'<a[^>]*href="{re.escape(old_url)}"[^>]*data-bbfile="[^"]*"[^>]*>.*?</a>'
+                    
+                    # Get image dimensions if available
+                    try:
+                        # bbfile_match = re.search(rf'data-bbfile="({[^"]+})"[^>]*href="{re.escape(old_url)}"', modified_body)
+                        bbfile_match = re.search(r'href="' + re.escape(old_url) + r'"[^>]*data-bbfile="({[^"]+})"', modified_body)
+                        if bbfile_match:
+                            file_data = json.loads(html_lib.unescape(bbfile_match.group(1)))
+                            alt_text = file_data.get('alternativeText') or file_data.get('displayName', '')
+                            
+                            # Create img tag
+                            img_tag = f'<img src="{new_url}" alt="{html_lib.escape(alt_text)}" style="max-width: 100%; height: auto;"> <p></p>'
+                            modified_body = re.sub(pattern, img_tag, modified_body, count=1)
+                    except:
+                        # Fallback: simple replacement
+                        img_tag = f'<img src="{new_url}" alt="{resource.get("filename", "")}" style="max-width: 100%; height: auto;"> <p></p>'
+                        modified_body = re.sub(pattern, img_tag, modified_body, count=1)
+                else:
+                    # For non-images, just update the URLs
+                    modified_body = modified_body.replace(f'href="{old_url}"', f'href="{new_url}"')
+                    modified_body = modified_body.replace(f"href='{old_url}'", f"href='{new_url}'")
+                    modified_body = modified_body.replace(f'src="{old_url}"', f'src="{new_url}"')
+                    modified_body = modified_body.replace(f"src='{old_url}'", f"src='{new_url}'")
+                
+                downloaded_count += 1
+        
+        if downloaded_count > 0:
+            print(f"      {Fore.GREEN}✓ Downloaded {downloaded_count} resources{Style.RESET_ALL}")
+
+        # Add CSS files to the HTML template
+        import glob
+        css_files = []   
+        ## adding css turned out to be shit ._. 
+        # glob.glob(os.path.join("./css/", "*.css"))     ######  <----  uncomment this and make it the value  of css_files  :) 
+        if css_files:
+            print(f"      {Fore.GREEN}✓ Found {len(css_files)} CSS files{Style.RESET_ALL}")
+            css_content = ""
+
+
+            for css_file in css_files:
+                try :
+                    print(f"      {Fore.GREEN}✓ Adding {css_file}{Style.RESET_ALL}")
+                    with open(css_file, "r",encoding="utf-8") as f:
+                        css_content += f.read()
+                except UnicodeDecodeError:
+                    # Fallback for files with different encoding
+                    print(f"      {Fore.YELLOW}⚠ Encoding issue in {css_file}, trying fallback{Style.RESET_ALL}")
+                    with open(css_file, "r", encoding="utf-8", errors="replace") as f:
+                        css_content += f.read()
+                
+                except Exception as e:
+                    print(f"      {Fore.RED}✗ Error: {str(e)}{Style.RESET_ALL}")
+                        
+            modified_body = f"""
+                            <style>
+                            {css_content}
+                            </style>
+                            """+ modified_body
+            
 
         # Create clean HTML document - exactly as it appears in Blackboard
         html_content = f"""<!DOCTYPE html>
@@ -129,28 +348,15 @@ def save_html_page(content, save_path, mode='html'):
 <head>
     <meta charset="utf-8">
     <title>{html_lib.escape(content.title)}</title>
-    <style>
-        body {{
-            font-family: Arial, Helvetica, sans-serif;
-            margin: 40px;
-            line-height: 1.6;
-            color: #333;
-        }}
-        img {{
-            max-width: 100%;
-            height: auto;
-        }}
-        a {{
-            color: #0066cc;
-        }}
-    </style>
+    
 </head>
 <body>
-{content.body}
+{modified_body}
 </body>
 </html>"""
 
         # Save as HTML - simple and clean
+        print(f"      {Fore.CYAN}Saving HTML...{Style.RESET_ALL}")
         with open(download_location, 'w', encoding='utf-8') as f:
             f.write(html_content)
         print(f"      {Fore.CYAN}✓ Saved as HTML: {filename}{Style.RESET_ALL}")
